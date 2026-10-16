@@ -304,6 +304,11 @@ class PSPTool:
                     'packed': file.rom_size
                 }
                 all_values['sizes'] = sizes
+                # Authoritative decode-trust bit (unlike the looser 'verified'
+                # info tag above, this requires full-body integrity coverage).
+                verified, method = file.decode_verification()
+                all_values['decodeVerified'] = verified
+                all_values['decodeVerificationMethod'] = method
 
             out.append(all_values)
 

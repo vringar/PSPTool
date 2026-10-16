@@ -8,13 +8,14 @@ from psptool import PSPTool
 from psptool.header_file import HeaderFile
 
 dirname = os.path.dirname(__file__)
-rom_fixtures_path = os.path.join(dirname, 'fixtures/roms')
+rom_fixtures_path = os.path.join(dirname, 'fixtures/test_files')
 
 # todo: add extraction tests
 #  - extract entry and make sure it has the correct size
 #  - only resign the ROM and check that it is parsed with the same output as the original ROM
 
 
+@unittest.skipUnless(os.path.isdir(rom_fixtures_path), "firmware fixtures submodule not checked out")
 class TestRomFiles(unittest.TestCase):
     # We'll cache PSPTool objects across tests in a class member
     cached_pts = {}
