@@ -35,7 +35,8 @@ class Directory(NestedBuffer):
                           'Zen 2'  : [b'\x05\x0B\xBC', b'\x01\x0A\xBC'],
                           'Zen 3'  : [b'\x01\x0C\xBC', b'\x00\x0C\xBC'],
                           'Zen 4'  : [b'\x04\x0D\xBC', b'\x0B\x0D\xBC'],
-                          'Zen 4/5': [b'\x03\x0D\xBC']
+                          'Zen 4/5': [b'\x03\x0D\xBC', b'\x01\x0D\xBC', b'\x00\x0E\xBC', b'\x0B\x0E\xBC',
+                                      b'\x0C\x0E\xBC', b'\x0D\x0E\xBC', b'\x10\x0E\xBC', b'\x11\x0E\xBC']
                          }
 
     @classmethod
