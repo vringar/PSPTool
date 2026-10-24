@@ -84,10 +84,32 @@ class TestDecodeVerified(unittest.TestCase):
                 if method != 'signature':
                     continue
                 body_len = len(entry.get_decrypted_decompressed_body())
+                if entry.signed_entity.verified_form == 'stored':
+                    body_len = entry.zlib_size
             with self.subTest(f"{os.path.basename(filename)} type=0x{entry.type:x}"):
                 self.assertGreaterEqual(
                     entry.size_signed, body_len,
                     "'signature' basis but signature does not span the whole body")
+
+    def test_signature_over_stored_zlib_stream(self):
+        """Zen4/5 sign the stored (compressed) bytes of a compressed entry, older
+        generations the decompressed ones; verification must accept either."""
+        stored = 0
+        for filename, entry in self.header_files():
+            if not (entry.compressed and entry.signed_entity is not None):
+                continue
+            with io.StringIO() as buf, contextlib.redirect_stderr(buf):
+                try:
+                    verified = entry.signed_entity.is_verified()
+                except Exception:
+                    continue
+            if verified and entry.signed_entity.verified_form == 'stored':
+                stored += 1
+                with self.subTest(f"{os.path.basename(filename)} type=0x{entry.type:x}"):
+                    forms = dict(entry.get_signed_bytes_forms())
+                    self.assertNotEqual(forms['stored'], forms['decoded'])
+        if not stored:
+            self.skipTest("no stored-form compressed signature in fixtures")
 
     def test_deterministic(self):
         for _filename, entry in self.header_files():

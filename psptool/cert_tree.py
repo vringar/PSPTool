@@ -35,6 +35,8 @@ class SignedEntity:
         # will be filled by CertificateTree
         self.certifying_keys = None
         self.contained_keys = set()
+        # which candidate form of the file the last successful verification matched
+        self.verified_form = None
 
     def get_address(self):
         return self.file.get_address()
@@ -95,7 +97,13 @@ class SignedEntity:
         return True
 
     def verify_with_pubkey(self, pubkey: PublicKey) -> bool:
-        return pubkey.verify_blob((self.file.get_signed_bytes()), self.signature.get_bytes())
+        forms = (self.file.get_signed_bytes_forms() if hasattr(self.file, 'get_signed_bytes_forms')
+                 else [('decoded', self.file.get_signed_bytes())])
+        for form, signed_bytes in forms:
+            if pubkey.verify_blob(signed_bytes, self.signature.get_bytes()):
+                self.verified_form = form
+                return True
+        return False
 
     # resigns this file only
     def resign_only(self, privkey: PrivateKey):

@@ -199,6 +199,16 @@ class HeaderFile(File):
         file_bytes = self.header.get_bytes() + self.get_decrypted_decompressed_body()
         return file_bytes[:len(self.header) + self.size_signed]
 
+    def get_signed_bytes_forms(self) -> list:
+        """Candidate (form, bytes) pairs the signature may cover. Older
+        generations sign the decompressed body, Zen4/5 sign the stored zlib
+        stream of a compressed entry."""
+        forms = [('decoded', self.get_signed_bytes())]
+        if self.compressed:
+            stored = self.header.get_bytes() + self.get_decrypted_body()
+            forms.append(('stored', stored[:len(self.header) + self.size_signed]))
+        return forms
+
     def _decrypted_decompressed_body(self, print_warning=True) -> tuple:
         """Returns (body, decompress_ok). When the entry is flagged compressed but
         its declared zlib stream fails to decompress, the still-compressed (but
@@ -252,7 +262,11 @@ class HeaderFile(File):
             # size_signed spans it, or if the header - which is always inside the
             # signed region - carries a checksum that matches the body. Otherwise
             # the tail past size_signed is unsigned and must not be called plain.
-            if self.size_signed >= len(body):
+            # If the signature covers the zlib stream, the decompressed body is a
+            # deterministic function of the signed bytes.
+            stored = self.signed_entity.verified_form == 'stored'
+            signed_extent = self.zlib_size if stored else len(body)
+            if self.size_signed >= signed_extent:
                 return True, 'signature'
             if self.has_sha256_checksum and self.verify_sha256(print_warning=print_warning):
                 return True, 'signature+sha256'
