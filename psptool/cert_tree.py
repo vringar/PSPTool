@@ -35,7 +35,7 @@ class SignedEntity:
         # will be filled by CertificateTree
         self.certifying_keys = None
         self.contained_keys = set()
-        # which candidate form of the file the last successful verification matched
+        # which candidate form of the file the last verification matched (None if it failed)
         self.verified_form = None
 
     def get_address(self):
@@ -75,9 +75,11 @@ class SignedEntity:
         return self.verify_with_tree()
 
     def is_verified_by(self, pubkey):
+        self.verified_form = None
         return self.verify_with_pubkey(pubkey.get_public_key())
 
     def verify_with_tree(self):
+        self.verified_form = None
         if not self.certifying_keys:  # works for None or set()
             raise errors.NoCertifyingKey(self)
 
@@ -454,7 +456,10 @@ class CertificateTree:
             assert seen_addresses == set(self.pubkeys_address.keys())
         else:
             for signed_entity in root.certified_entities:
-                verified = signed_entity.is_verified_by(root)
+                try:
+                    verified = signed_entity.is_verified_by(root)
+                except Exception:
+                    verified = False
                 if not verified:
                     self.verification_failed.add(signed_entity)
                 self._print_signed_entity_tree_line(signed_entity, verified, indent)

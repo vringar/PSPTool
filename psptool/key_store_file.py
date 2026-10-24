@@ -221,6 +221,7 @@ class KeyStoreKey(NestedBuffer):
 
         self._key_size = NestedBuffer(self.header, 0x4, buffer_offset=0x20)
         assert self.key_size == self.crypto_material.buffer_size << 3
+        assert self.key_size in {2048, 4096}
 
         # todo: version maybe?
         assert self.header.get_bytes(0x24, 0x2c) in [

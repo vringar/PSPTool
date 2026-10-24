@@ -20,7 +20,7 @@ from .utils import NestedBuffer, chunker
 from base64 import b64encode
 
 
-class UnknownPubkeyFileVersion(Exception):
+class UnknownPubkeyFileVersion(File.ParseError):
     pass
 
 

@@ -51,7 +51,8 @@ class Blob(NestedBuffer):
         ]
 
         possible_rom_sizes = [32, 16, 8]
-        _rom_size = max(value for value in possible_rom_sizes if value * 1024 * 1024 <= self.buffer_size)
+        _rom_size = max((value for value in possible_rom_sizes if value * 1024 * 1024 <= self.buffer_size),
+                        default=min(possible_rom_sizes))
         rom_size = _rom_size * 1024 * 1024
         self.psptool.ph.print_warning(f"Input  file is {self.buffer_size:#x}, will assume ROM size of {_rom_size}M")
 
@@ -63,21 +64,23 @@ class Blob(NestedBuffer):
                     # would lead to Blob underflow
                     continue
                 rom_page = int(fet_location / self._MAX_PAGE_SIZE)
-                if fet_location - fet_offset + rom_size - rom_page * self._MAX_PAGE_SIZE > self.buffer_size:
+                rom_offset = fet_location - fet_offset  # e.g. 0x20800 - 0x20000 = 0x0800
+                # W/A for images with single ROMs that have entries crossing 16MB boundary
+                potential_rom_size = rom_size if rom_page == 0 else min(rom_size, self._MAX_PAGE_SIZE)
+                if rom_offset + potential_rom_size > self.buffer_size:
                     # would lead to Blob overflow
                     continue
                 try:
-                    rom_offset = fet_location - fet_offset  # e.g. 0x20800 - 0x20000 = 0x0800
-                    # W/A for images with single ROMs that have entries crossing 16MB boundary
-                    if rom_page == 0:
-                        potential_rom = Rom(self, rom_size, rom_offset, fet_offset, psptool)
-                    else:
-                        potential_rom = Rom(self, min(rom_size, self._MAX_PAGE_SIZE), rom_offset, fet_offset, psptool)
+                    potential_rom = Rom(self, potential_rom_size, rom_offset, fet_offset, psptool)
                     self.roms.append(potential_rom)
                     fet_parsed = True
                     break  # found correct fet_offset!
                 except EmptyFet:
                     self.psptool.ph.print_warning(f"Empty FET at offset {hex(fet_offset)}, trying next offset")
+                    continue
+                except Exception as e:
+                    self.psptool.ph.print_warning(f"Invalid FET at {hex(fet_location)} for ROM offset "
+                                                  f"{hex(rom_offset)}: {e!r}, trying next offset")
                     continue
             if not fet_parsed:
                 self.psptool.ph.print_warning(f"Skipping FET at {hex(fet_location)} due to unknown ROM alignment")
@@ -168,7 +171,7 @@ class Blob(NestedBuffer):
                         assert isinstance(file, PubkeyFile)
                         file.inline_keys.add(file)
                         found_pubkeys.append(file)
-                    except File.ParseError as e:
+                    except Exception as e:
                         self.psptool.ph.print_warning(f"_find_pubkey: File parse error at 0x{start_offset:x}")
                         self.psptool.ph.print_warning(f'{e}')
 

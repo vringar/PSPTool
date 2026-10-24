@@ -42,11 +42,11 @@ class NestedBuffer:
         self.parent_buffer = parent_buffer
         self.buffer_size = buffer_size
         self.buffer_offset = buffer_offset
-        if hasattr(parent_buffer, 'buffer_size'):
-            assert self.buffer_offset + self.buffer_size <= parent_buffer.buffer_size, \
-                f'Cannot create child buffer: overflows parent buffer\'s bounds!'
-        assert (self.buffer_size <= self.buffer_offset + self.buffer_size), \
-            f'sz=0x{self.buffer_size:x},off=0x{self.buffer_offset:x}'
+        # Raised explicitly so the checks survive `python -O`; AssertionError is what callers catch
+        if self.buffer_size < 0 or self.buffer_offset < 0:
+            raise AssertionError(f'sz=0x{self.buffer_size:x},off=0x{self.buffer_offset:x}')
+        if hasattr(parent_buffer, 'buffer_size') and self.buffer_offset + self.buffer_size > parent_buffer.buffer_size:
+            raise AssertionError('Cannot create child buffer: overflows parent buffer\'s bounds!')
 
     def __len__(self):
         return self.buffer_size
@@ -238,16 +238,19 @@ def zlib_compress(s):
     return zlib.compress(s, 9)
 
 
-def zlib_decompress(s):
+def zlib_decompress(s, max_length=0):
     """ Checks s for the first appearance of a zlib header and returns the uncompressed start of s as well as the
-    decompressed section. If no zlib header is found, s is returned as is. """
+    decompressed section. If no zlib header is found, s is returned as is. Raises zlib.error if the stream is
+    incomplete or would decompress to more than max_length bytes (0: unlimited). """
 
     zlib_start = zlib_find_header(s)
 
     if zlib_start != -1:
         uncompressed = s[:zlib_start]
-        compressed = s[zlib_start:]
-        decompressed = zlib.decompress(compressed)
+        decompressor = zlib.decompressobj()
+        decompressed = decompressor.decompress(s[zlib_start:], max_length)
+        if not decompressor.eof:
+            raise zlib.error(f'Incomplete zlib stream or decompressed size exceeds 0x{max_length:x} bytes')
 
         return uncompressed + decompressed
 

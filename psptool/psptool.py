@@ -17,8 +17,6 @@
 from prettytable import PrettyTable
 import sys, json
 
-from typing import Dict
-
 from .file import File
 from .directory import Directory
 from .header_file import HeaderFile
@@ -43,9 +41,6 @@ class PSPTool:
     def __init__(self, rom_bytes, verbose=False, filename=None):
         self.filename = filename
         self.ph = PrintHelper(verbose)
-        
-        self.directories_by_offset: Dict[int, 'Directory'] = {}
-        self.files_by_offset: Dict[int, 'File'] = {}
 
         self.blob = Blob(rom_bytes, len(rom_bytes), self)
         self.cert_tree = CertificateTree.from_blob(self.blob, self)
@@ -123,6 +118,8 @@ class PSPTool:
                     info.append(f'key_missing({file.signed_entity.certifying_id.as_string()[:4]})')
                 except errors.SignatureInvalid:
                     info.append(f'invalid_sig({file.get_readable_signed_by()})')
+                except Exception:
+                    info.append('verify_error')
             if file.is_legacy:
                 info.append('legacy_header')
             if file.encrypted:
@@ -238,6 +235,8 @@ class PSPTool:
                         info.append('verified')
                 except errors.NoCertifyingKey:
                     info.append('no_key')
+                except Exception:
+                    info.append('verify_error')
             if file.is_legacy:
                 info.append('legacy header')
             if file.encrypted:

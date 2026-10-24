@@ -15,11 +15,20 @@ class Rom(NestedBuffer):
 
         self.unique_entries = set()
         self.pubkeys = {}
+        # Directories and files are deduplicated per ROM, keyed by their ROM-relative offset
+        self.directories_by_offset = {}
+        self.files_by_offset = {}
 
         self.agesa_version = self._find_agesa_version()
         self.fet = Fet(self, fet_offset, psptool)
 
         self.directories = self.fet.directories
+
+    def address_to_offset(self, address):
+        # if ROM is bigger than 16MB, we have to override the mask for physical address
+        if address >= 0xFF000000 and self.addr_mask + 1 > 16 * 1024 * 1024:
+            return address & 0x00FFFFFF
+        return address & self.addr_mask
 
     def _find_agesa_version(self):
         # from https://www.amd.com/system/files/TechDocs/44065_Arch2008.pdf
@@ -44,10 +53,10 @@ class Rom(NestedBuffer):
         # one for Rome. Both will contain a valid FET which needs to be parsed.
         if len(res) == 2:
             self.dual_rom = True
-            self.agesa_version_second = str(re.sub(b'\x00', b' ', res[1]).strip().decode("ascii"))
-            return str(re.sub(b'\x00', b' ', res[0]).strip().decode("ascii"))
+            self.agesa_version_second = str(re.sub(b'\x00', b' ', res[1]).strip().decode("ascii", "replace"))
+            return str(re.sub(b'\x00', b' ', res[0]).strip().decode("ascii", "replace"))
         elif len(res) == 1:
-            return str(re.sub(b'\x00', b' ', res[0]).strip().decode("ascii"))
+            return str(re.sub(b'\x00', b' ', res[0]).strip().decode("ascii", "replace"))
         else:
             return 'AGESA_UNKNOWN'
 

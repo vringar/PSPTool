@@ -50,14 +50,7 @@ class DirectoryEntry(NestedBuffer):
         if addr_mode == 0:
             # x86 physical address, should be in range 0xff000000 - 0xffffffff
             # But some images use flash offset in x86 physical address mode.
-            # If ROM is bigger than 16MB and the entry address is in the
-            # 0xff000000 - 0xffffffff range, we have to override the mask for
-            # physical address.
-            rom_size = self.parent_directory.rom.addr_mask + 1
-            if self.offset > 0xFF000000 and rom_size > 16 * 1024 * 1024:
-                return self.offset & 0x00FFFFFF
-            else:
-                return self.offset & self.parent_directory.rom.addr_mask
+            return self.parent_directory.rom.address_to_offset(self.offset)
         elif addr_mode == 1:
             # Flash offset from start of BIOS, most common on modern systems
             return self.offset
