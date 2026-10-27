@@ -73,8 +73,8 @@ class PubkeyFile(File):
         # crypto material
         self._pubexp_bits = NestedBuffer(self, 4, 0x38)
         self._modulus_bits = NestedBuffer(self, 4, 0x3c)
-        assert self.pubexp_bits == self.modulus_bits
-        assert self.pubexp_bits in {2048, 4096}
+        if self.pubexp_bits != self.modulus_bits or self.pubexp_bits not in {2048, 4096}:
+            raise File.ParseError(f'Unsupported key size {self.pubexp_bits}/{self.modulus_bits}')
 
         self.crypto_material = NestedBuffer(self, self.pubexp_size + self.modulus_size, self.HEADER_LEN)
         self._pubexp = NestedBuffer(self.crypto_material, self.pubexp_size)

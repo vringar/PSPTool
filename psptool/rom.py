@@ -18,6 +18,7 @@ class Rom(NestedBuffer):
         # Directories and files are deduplicated per ROM, keyed by their ROM-relative offset
         self.directories_by_offset = {}
         self.files_by_offset = {}
+        self.entry_count = 0
 
         self.agesa_version = self._find_agesa_version()
         self.fet = Fet(self, fet_offset, psptool)

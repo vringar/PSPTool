@@ -41,18 +41,22 @@ class Fet(NestedBuffer):
     def __repr__(self):
         return f'Fet(len(directories)={len(self.directories)})'
 
+    _MAX_SIZE = 0x100
+    _MAX_COMBO_ENTRIES = 64
+
     def _determine_size(self, fet_offset):
-        size = 0
-        step_size = 4
         end_sequence = 4 * b'\xff\xff\xff\xff'
 
-        while self.rom[
-              (fet_offset + size)
-              :(fet_offset + size + len(end_sequence))
-              ] != end_sequence:
-            size += step_size
-            if fet_offset + size + len(end_sequence) > len(self.rom):
-                raise ValueError(f'FET at 0x{fet_offset:x} has no end marker before the end of the ROM')
+        # Real FETs are tiny; only look for the end marker in a bounded window
+        window = self.rom.get_bytes(fet_offset, max(0, min(self._MAX_SIZE + len(end_sequence), len(self.rom) - fet_offset)))
+        size = 0
+        while True:
+            size = window.find(end_sequence, size)
+            if size == -1:
+                raise ValueError(f'FET at 0x{fet_offset:x} has no end marker within 0x{self._MAX_SIZE:x} bytes')
+            if size % 4 == 0:
+                break
+            size += 1
 
         if size <= 0:
             raise EmptyFet()
@@ -94,6 +98,8 @@ class Fet(NestedBuffer):
     def _parse_combo_dir(self, dir_addr):
         results = []
         no_of_entries = int.from_bytes(self.rom[dir_addr + 8: dir_addr + 0xc], 'little')
+        if no_of_entries > self._MAX_COMBO_ENTRIES:
+            raise ValueError(f'Combo directory has too many entries ({no_of_entries})')
         combo_dir = self.rom[dir_addr: dir_addr + 16 * (no_of_entries + 2)]
 
         # Combo dir entries seem to begin at offset 0x20, make sure we don't

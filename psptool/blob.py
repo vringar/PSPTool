@@ -30,6 +30,7 @@ class Blob(NestedBuffer):
     _FIRMWARE_ENTRY_MAGIC = b'\xAA\x55\xAA\x55'
     # All structures per Rom must be in 16MB windows
     _MAX_PAGE_SIZE = 16 * 1024 * 1024
+    _MAX_ROMS = 16
     class NoFirmwareEntryTableError(Exception):
         pass
 
@@ -58,6 +59,9 @@ class Blob(NestedBuffer):
 
         # For each FET, we try to create a 16MB ROM starting at `FET - offset`
         for fet_location in self._find_fets():
+            if len(self.roms) >= self._MAX_ROMS:
+                self.psptool.ph.print_warning(f"Found more than {self._MAX_ROMS} ROMs, ignoring the remaining FETs")
+                break
             fet_parsed = False
             for fet_offset in possible_fet_offsets:
                 if fet_location < fet_offset:
@@ -143,13 +147,17 @@ class Blob(NestedBuffer):
         for file in self.unique_files():
             if type(file) == PubkeyFile:
                 continue  # Pubkeys don't have inline keys but will only produce false positives
-            m = re.finditer(re.escape(binascii.a2b_hex(fp)), file.get_bytes())
-            for index in m:
-                start_offset = index.start() - 4
-                if int.from_bytes(self[start_offset:start_offset + 4], 'little') in PubkeyFile.KNOWN_VERSIONS:
+            data = file.get_bytes()
+            for index in re.finditer(re.escape(binascii.a2b_hex(fp)), data):
+                try:
+                    # Offsets are relative to the file the match was found in
+                    start_offset = index.start() - 4
+                    if start_offset < 0 or start_offset + 0x40 > len(data):
+                        continue
+                    if int.from_bytes(data[start_offset:start_offset + 4], 'little') not in PubkeyFile.KNOWN_VERSIONS:
+                        continue
                     # Maybe a pubkey. Determine its size:
-                    pub_exp_size = int.from_bytes(self[start_offset + 0x38: start_offset + 0x3c],
-                                                  'little')
+                    pub_exp_size = int.from_bytes(data[start_offset + 0x38: start_offset + 0x3c], 'little')
                     if pub_exp_size == 2048:
                         size = 0x240
                     elif pub_exp_size == 4096:
@@ -157,8 +165,8 @@ class Blob(NestedBuffer):
                     else:
                         continue
 
-                    key_id = self[start_offset + 0x04: start_offset + 0x14]
-                    cert_id = self[start_offset + 0x14: start_offset + 0x24]
+                    key_id = data[start_offset + 0x04: start_offset + 0x14]
+                    cert_id = data[start_offset + 0x14: start_offset + 0x24]
 
                     if key_id != cert_id and cert_id != b'\0' * 0x10:
                         if pub_exp_size == 2048:
@@ -166,14 +174,12 @@ class Blob(NestedBuffer):
                         else:
                             size += 0x200
 
-                    try:
-                        file = InlinePubkeyFile(file, start_offset, size, self, self.psptool)
-                        assert isinstance(file, PubkeyFile)
-                        file.inline_keys.add(file)
-                        found_pubkeys.append(file)
-                    except Exception as e:
-                        self.psptool.ph.print_warning(f"_find_pubkey: File parse error at 0x{start_offset:x}")
-                        self.psptool.ph.print_warning(f'{e}')
+                    pubkey_file = InlinePubkeyFile(file, start_offset, size, self, self.psptool)
+                    assert isinstance(pubkey_file, PubkeyFile)
+                    pubkey_file.inline_keys.add(pubkey_file)
+                    found_pubkeys.append(pubkey_file)
+                except Exception as e:
+                    self.psptool.ph.print_warning(f"_find_pubkey: File parse error in {file} at 0x{index.start():x}: {e!r}")
 
         return found_pubkeys
 

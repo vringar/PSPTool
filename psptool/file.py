@@ -302,7 +302,7 @@ class File(NestedBuffer):
                 raise File.ParseError(e)
         else:
             if self.compressed:
-                zlib_hdr = zlib_find_header(self.blob[offset:])
+                zlib_hdr = zlib_find_header(self.blob.get_bytes(offset, 0x500))
                 if zlib_hdr != -1:
                     zlib_size = int.from_bytes(
                         self.blob.get_bytes(offset + 0x14, 4),

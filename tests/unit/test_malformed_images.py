@@ -337,6 +337,92 @@ class TestMalformedImages(unittest.TestCase):
         self.assertFalse(entity.is_verified())
         self.assertIsNone(entity.verified_form)
 
+    def test_inline_pubkey_match_near_the_end_of_a_file_is_ignored(self):
+        key_id = b'\xAB' * 16
+        img = image(entry(0x04, 16 * MB, X86 + 0), entry(0x02, 0x300, X86 + BAD))
+        img[BAD:BAD + 0x300] = header(signed=1, rom_size=0x300, key_id=key_id) + b'B' * 0x200
+        img[16 * MB - 0x24:16 * MB - 0x20] = struct.pack('<I', 1)
+        img[16 * MB - 0x20:16 * MB - 0x10] = key_id
+        self.assertGoodSiblingParsed(parse(img)[0])
+
+    def test_unterminated_fet_is_rejected_quickly(self):
+        img = bytearray(b'\0' * 32 * MB)
+        for i in range(7):
+            m = 16 * MB + 0x1000 + 8 * i
+            img[m:m + 4] = b'\xAA\x55\xAA\x55'
+        pt, stderr = parse(img)
+        self.assertEqual(pt.blob.roms, [])
+        self.assertIn('Warning', stderr)
+
+    def test_compressed_microcode_header_does_not_retain_the_body(self):
+        bomb = zlib.compress(b'\x01\x02\x03\x04\x05\x06\x07\x08' + b'\0' * (4 * MB), 9)
+        bomb += b'\0' * (-len(bomb) % 16)
+        size = 0x100 + len(bomb)
+        img = blank()
+        put_fet(img, FET, [X86 + DIR])
+        img[0x100000:0x100000 + size] = header(compressed=1, zlib_size=len(bomb)) + bomb
+        put_dir(img, DIR, [struct.pack('<BBHIIIQ', 0x66, 0, 0, size, X86 + 0x100000, 0, 0)], magic=b'$BHD')
+        pt, _ = parse(img)
+        microcode = next(file for file in files(pt) if file.type == 0x66)
+        self.assertEqual((microcode.date, microcode.patch_level), (0x04030201, 0x08070605))
+        self.assertFalse(hasattr(microcode, 'body'))
+
+    def test_aliased_and_oversized_directory_references_are_contained(self):
+        with self.subTest('secondary pointers aliasing one directory'):
+            img = blank()
+            put_fet(img, FET, [X86 + DIR])
+            img[GOOD:GOOD + 0x200] = header() + b'A' * 0x100
+            ents = [entry(0x01, 0x200, GOOD)] + [entry(0x40, 0x100, DIR + k * 16 * MB) for k in range(1, 256)]
+            put_dir(img, DIR, ents, info=1 << 29)
+            pt, _ = parse(img)
+            self.assertEqual([d.get_address() for d in pt.blob.roms[0].directories], [DIR])
+        with self.subTest('combo directory with too many entries'):
+            img = image(pointers=(X86 + 0x100000,))
+            put_combo(img, 0x100000, [DIR] * 1000)
+            pt, stderr = parse(img)
+            self.assertIn('Warning', stderr)
+        with self.subTest('overlapping directories exhaust the entry budget'):
+            img = blank()
+            rec = b'$PSP' + b'\0' * 4 + struct.pack('<II', 3000, 0)
+            for k in range(3100):
+                img[0x100000 + 16 * k:0x100000 + 16 * k + 16] = rec
+            img[3000:3000 + 0x200] = header() + b'A' * 0x100
+            put_fet(img, FET, [X86 + 0x100000 + 16 * k for k in range(40)])
+            pt, _ = parse(img)
+            self.assertLess(sum(len(d.entries) for d in pt.blob.roms[0].directories), 100000)
+
+    def test_unsupported_key_sizes_are_skipped(self):
+        for t, blob in ((0x00, pubkey(b'\x44' * 16, bits=1024)), (0x50, key_store(1024))):
+            img = image(entry(t, len(blob), X86 + BAD))
+            img[BAD:BAD + len(blob)] = blob
+            pt, _ = parse(img)
+            self.assertGoodSiblingParsed(pt)
+
+    def test_resign_only_signs_the_form_that_was_verified(self):
+        from psptool.crypto import RsaPrivateKey
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        key_id = b'\xAB' * 16
+        stream = zlib.compress(b'PLAINTEXT' * 300)
+        stream += b'\0' * (-len(stream) % 16)
+        signed_header = header(signed=1, compressed=1, zlib_size=len(stream), size_signed=len(stream),
+                               rom_size=0x100 + len(stream) + 0x100, key_id=key_id)
+        signature = private_key.sign(bytes(signed_header) + stream,
+                                     padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32), hashes.SHA256())
+        signed_file = signed_header + stream + signature
+        img = image(entry(0x00, 0x240, X86 + BAD), entry(0x02, len(signed_file), X86 + BAD + 0x1000))
+        img[BAD:BAD + 0x240] = pubkey(key_id, modulus=private_key.public_key().public_numbers().n)
+        img[BAD + 0x1000:BAD + 0x1000 + len(signed_file)] = signed_file
+        pt, _ = parse(img)
+        entity = next(file for file in files(pt) if file.type == 0x02).signed_entity
+        self.assertTrue(entity.is_verified())
+        self.assertEqual(entity.verified_form, 'stored')
+        new_key = next(c for c in RsaPrivateKey.__subclasses__() if c.key_bits == 2048).generate_new()
+        with contextlib.redirect_stdout(io.StringIO()):
+            entity.resign_only(new_key)
+        self.assertEqual(entity.resigned_form, 'stored')
+        self.assertTrue(entity.verify_with_pubkey(new_key.get_public_key()))
+        self.assertEqual(entity.verified_form, 'stored')
+
 
 if __name__ == '__main__':
     unittest.main()

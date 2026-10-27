@@ -31,6 +31,10 @@ class Directory(NestedBuffer):
     ENTRY_SIZE = DirectoryEntry.ENTRY_SIZE
     FILE_CLASS = File
 
+    # Per-ROM budgets against crafted images with aliased or overlapping directories
+    MAX_DIRECTORIES_PER_ROM = 4096
+    MAX_ENTRIES_PER_ROM = 1 << 16
+
     ZEN_GENERATION_IDS = {'Zen 1'  : [b'\x00\x09\xBC', b'\x00\x0A\xBC'],
                           'Zen 2'  : [b'\x05\x0B\xBC', b'\x01\x0A\xBC'],
                           'Zen 3'  : [b'\x01\x0C\xBC', b'\x00\x0C\xBC'],
@@ -64,6 +68,9 @@ class Directory(NestedBuffer):
         todo = [(offset, zen_generation, False)]
         while todo:
             offset, zen_generation, is_tertiary_pointer = todo.pop()
+            if len(directories_by_offset) >= cls.MAX_DIRECTORIES_PER_ROM or fet.rom.entry_count >= cls.MAX_ENTRIES_PER_ROM:
+                fet.psptool.ph.print_warning("Too many directories or entries in ROM, ignoring the rest")
+                break
             try:
                 if is_tertiary_pointer:
                     # Tertiary directories (double references introduced in Zen 4): resolve one more indirection
@@ -77,6 +84,8 @@ class Directory(NestedBuffer):
                     zen_generation_id = hex(int.from_bytes(directory_body[20:24], 'little'))
                     zen_generation += f' (PSP ID {zen_generation_id})'
 
+                # Resolve to a ROM offset first so aliased addresses share one dedup key
+                offset = fet.rom.address_to_offset(offset)
                 if offset in directories_by_offset:
                     directories_by_offset[offset].update_zen_generation(fet, zen_generation)
                     found_directories.append(directories_by_offset[offset])
@@ -93,6 +102,7 @@ class Directory(NestedBuffer):
                 continue
 
             directories_by_offset[offset] = directory
+            fet.rom.entry_count += len(directory.entries)
             found_directories.append(directory)
             todo += reversed([(o, zen_generation, False) for o in directory.secondary_directory_offsets] +
                              [(o, None, True) for o in directory.tertiary_directory_offsets])
@@ -101,7 +111,7 @@ class Directory(NestedBuffer):
 
     @classmethod
     def from_offset(cls, fet, rom_offset, zen_generation=None):
-        rom_offset &= fet.rom.addr_mask
+        rom_offset = fet.rom.address_to_offset(rom_offset)
         magic = fet.rom.get_bytes(rom_offset, 4)
 
         if magic == b'\xff\xff\xff\xff' or magic == b'\x00\x00\x00\x00':
@@ -120,7 +130,7 @@ class Directory(NestedBuffer):
         self.rom = parent_rom
         self.buffer_offset = offset
         self.psptool = psptool
-        self.zen_generation = zen_generation
+        self.zen_generations = [] if zen_generation is None else [zen_generation]
         self.bios_directory_type = BiosDirectory
 
         # a directory must parse itself before it knows its size and can initialize its buffer
@@ -239,18 +249,19 @@ class Directory(NestedBuffer):
         # 3. Update checksum
         self.update_checksum()
 
+    @property
+    def zen_generation(self):
+        return '\n'.join(self.zen_generations) if self.zen_generations else None
+
     def update_zen_generation(self, fet, zen_generation):
         if zen_generation is None:
             return
         todo = [self]
         while todo:
             directory = todo.pop()
-            if directory is None or zen_generation in (directory.zen_generation or ''):
+            if directory is None or zen_generation in directory.zen_generations:
                 continue
-            if directory.zen_generation is None:
-                directory.zen_generation = zen_generation
-            else:
-                directory.zen_generation += '\n' + zen_generation
+            directory.zen_generations.append(zen_generation)
             todo += [fet.rom.directories_by_offset.get(offset) for offset in directory.secondary_directory_offsets]
 
 

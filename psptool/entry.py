@@ -53,14 +53,14 @@ class DirectoryEntry(NestedBuffer):
             return self.parent_directory.rom.address_to_offset(self.offset)
         elif addr_mode == 1:
             # Flash offset from start of BIOS, most common on modern systems
-            return self.offset
+            return self.parent_directory.rom.address_to_offset(self.offset)
         elif addr_mode == 2:
             # Flash offset from start of directory header
-            return self.parent_directory.buffer_offset + self.offset
+            return self.parent_directory.rom.address_to_offset(self.parent_directory.buffer_offset + self.offset)
         elif addr_mode == 3:
             # Flash offset from start of the slot
             # TODO: How to calculate the offset from slot? Is this correct?
-            return self.parent_directory.buffer_offset + self.offset
+            return self.parent_directory.rom.address_to_offset(self.parent_directory.buffer_offset + self.offset)
 
     @property
     def type(self):

@@ -25,6 +25,9 @@ class KeyStoreFile(HeaderFile):
     def get_checksummed_bytes(self):
         return self.key_store.get_bytes()
 
+    # Real key stores are a few KiB; bound what a compressed one may expand to
+    _MAX_KEY_STORE_SIZE = 0x100000
+
     def _parse(self):
         super()._parse()
 
@@ -37,7 +40,7 @@ class KeyStoreFile(HeaderFile):
         key_store_size = self.header.body_size
 
         if self.compressed:
-            self.key_store = KeyStore(bytearray(self.get_decrypted_decompressed_body()), self.size_uncompressed, buffer_offset=0)
+            self.key_store = KeyStore(bytearray(self.get_decrypted_decompressed_body(self._MAX_KEY_STORE_SIZE)), self.size_uncompressed, buffer_offset=0)
         else:
             self.key_store = KeyStore(self, key_store_size, buffer_offset=key_store_start)
 
@@ -221,7 +224,8 @@ class KeyStoreKey(NestedBuffer):
 
         self._key_size = NestedBuffer(self.header, 0x4, buffer_offset=0x20)
         assert self.key_size == self.crypto_material.buffer_size << 3
-        assert self.key_size in {2048, 4096}
+        if self.key_size not in {2048, 4096}:
+            raise File.ParseError(f'Unsupported key size {self.key_size}')
 
         # todo: version maybe?
         assert self.header.get_bytes(0x24, 0x2c) in [

@@ -19,6 +19,8 @@ import struct
 from binascii import hexlify
 from hashlib import md5, sha256, sha384
 
+import zlib
+
 from . import errors
 from .utils import NestedBuffer, zlib_decompress, zlib_find_header, decrypt, shannon
 from .file import File
@@ -189,13 +191,14 @@ class HeaderFile(File):
             forms.append(('stored', stored[:len(self.header) + self.size_signed]))
         return forms
 
-    def _decrypted_decompressed_body(self, print_warning=True) -> tuple:
+    def _decrypted_decompressed_body(self, print_warning=True, max_size=None) -> tuple:
         """Returns (body, decompress_ok). When the entry is flagged compressed but
         its declared zlib stream fails to decompress, the still-compressed (but
         decrypted) bytes are returned and decompress_ok is False, so callers can
         tell a genuine plaintext body from a silently-failed decode. A zlib_size
         of 0 (Zen 1 era images) leaves the stream length unrecorded; the stream
-        then runs to its end marker within the body."""
+        then runs to its end marker within the body. max_size caps the decompressed size
+        (default: the size of the whole blob)."""
         output = self.get_decrypted_body()
 
         if self.compressed:
@@ -204,15 +207,29 @@ class HeaderFile(File):
                 if self.zlib_size > len(output) or zlib_find_header(stream) == -1:
                     raise ValueError('No zlib stream within the body')
                 # A decompressed entry larger than its whole ROM is a zlib bomb, not firmware
-                return zlib_decompress(stream, len(self.blob)), True
+                return zlib_decompress(stream, len(self.blob) if max_size is None else max_size), True
             except Exception:
                 if print_warning:
                     self.psptool.ph.print_warning(f"ZLIB decompression failed on file {self.get_readable_type()}")
                 return output, False
         return output, True
 
-    def get_decrypted_decompressed_body(self) -> bytes:
-        return self._decrypted_decompressed_body()[0]
+    def get_decrypted_decompressed_body(self, max_size=None) -> bytes:
+        return self._decrypted_decompressed_body(max_size=max_size)[0]
+
+    def get_decrypted_decompressed_prefix(self, size) -> bytes:
+        """The first `size` bytes of the decoded body, without materializing the rest of a compressed body."""
+        output = self.get_decrypted_body()
+        if self.compressed:
+            try:
+                stream = output[:self.zlib_size] if self.zlib_size else output
+                start = zlib_find_header(stream)
+                if self.zlib_size > len(output) or start == -1:
+                    raise ValueError('No zlib stream within the body')
+                return stream[:start] + zlib.decompressobj().decompress(stream[start:], size)
+            except Exception:
+                pass
+        return output[:size]
 
     def decode_verification(self, print_warning=False) -> tuple:
         """Returns (verified, basis) in a single pass - use this when you want
