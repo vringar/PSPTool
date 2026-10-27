@@ -35,8 +35,10 @@ class SignedEntity:
         # will be filled by CertificateTree
         self.certifying_keys = None
         self.contained_keys = set()
-        # which candidate form of the file the last successful verification matched
+        # which candidate form of the file the last verification matched (None if it failed)
         self.verified_form = None
+        # the form resign_only() signed
+        self.resigned_form = None
 
     def get_address(self):
         return self.file.get_address()
@@ -75,9 +77,11 @@ class SignedEntity:
         return self.verify_with_tree()
 
     def is_verified_by(self, pubkey):
+        self.verified_form = None
         return self.verify_with_pubkey(pubkey.get_public_key())
 
     def verify_with_tree(self):
+        self.verified_form = None
         if not self.certifying_keys:  # works for None or set()
             raise errors.NoCertifyingKey(self)
 
@@ -108,6 +112,13 @@ class SignedEntity:
     # resigns this file only
     def resign_only(self, privkey: PrivateKey):
         print(f'Resigning {self} ({self.file})')
+        # Find out which form of the file the existing signature covers (before the body is rehashed)
+        # and keep signing that form
+        try:
+            self.verify_with_tree()
+        except errors.NoCertifyingKey:
+            pass
+        form = self.verified_form or 'decoded'
         if self.file.has_sha256_checksum:
             print(f'    Checking sha256 checksum of {self.file}')
             if self.file.verify_sha256(print_warning=False):
@@ -118,7 +129,10 @@ class SignedEntity:
                 print(f'        Done')
         assert self.signature.buffer_size == privkey.signature_size, \
             f"{self.signature.buffer_size=}, {privkey.signature_size=}"
-        signature = privkey.sign_blob(self.file.get_signed_bytes())
+        signed_bytes = dict(self.file.get_signed_bytes_forms() if hasattr(self.file, 'get_signed_bytes_forms')
+                            else [('decoded', self.file.get_signed_bytes())])[form]
+        signature = privkey.sign_blob(signed_bytes)
+        self.resigned_form = form
         assert len(signature) == self.signature.buffer_size, f'Could not resign {self} with {privkey}: ' \
                                                              f'The new signature has the wrong length ' \
                                                              f'{len(signature)} != {self.signature.buffer_size}'
@@ -249,7 +263,8 @@ class PublicKeyEntity:
 
         # check crypto
         for se in self.certified_entities:
-            assert se.is_verified_by(self), f'Resigning {se} with {self} failed!'
+            assert se.is_verified_by(self) and se.verified_form == se.resigned_form, \
+                f'Resigning {se} with {self} failed!'
 
         # continue
         if recursive:
@@ -454,7 +469,10 @@ class CertificateTree:
             assert seen_addresses == set(self.pubkeys_address.keys())
         else:
             for signed_entity in root.certified_entities:
-                verified = signed_entity.is_verified_by(root)
+                try:
+                    verified = signed_entity.is_verified_by(root)
+                except Exception:
+                    verified = False
                 if not verified:
                     self.verification_failed.add(signed_entity)
                 self._print_signed_entity_tree_line(signed_entity, verified, indent)

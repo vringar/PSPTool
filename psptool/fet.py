@@ -41,16 +41,22 @@ class Fet(NestedBuffer):
     def __repr__(self):
         return f'Fet(len(directories)={len(self.directories)})'
 
+    _MAX_SIZE = 0x100
+    _MAX_COMBO_ENTRIES = 64
+
     def _determine_size(self, fet_offset):
-        size = 0
-        step_size = 4
         end_sequence = 4 * b'\xff\xff\xff\xff'
 
-        while self.rom[
-              (fet_offset + size)
-              :(fet_offset + size + len(end_sequence))
-              ] != end_sequence:
-            size += step_size
+        # Real FETs are tiny; only look for the end marker in a bounded window
+        window = self.rom.get_bytes(fet_offset, max(0, min(self._MAX_SIZE + len(end_sequence), len(self.rom) - fet_offset)))
+        size = 0
+        while True:
+            size = window.find(end_sequence, size)
+            if size == -1:
+                raise ValueError(f'FET at 0x{fet_offset:x} has no end marker within 0x{self._MAX_SIZE:x} bytes')
+            if size % 4 == 0:
+                break
+            size += 1
 
         if size <= 0:
             raise EmptyFet()
@@ -63,12 +69,7 @@ class Fet(NestedBuffer):
             # TODO: Why is 0xFFFFFFFe a possible value here?
             if rom_addr in [0x0, 0xFFFFFFFF, 0xFFFFFFFe]:
                 continue
-            # if ROM is bigger than 16MB, we have to override the mask for
-            # physical address
-            if rom_addr > 0xFF000000 and self.rom.addr_mask + 1 > 16 * 1024 * 1024:
-                rom_addr &= 0x00FFFFFF
-            else:
-                rom_addr &= self.rom.addr_mask
+            rom_addr = self.rom.address_to_offset(rom_addr)
 
             try:
                 dir_magic = self.rom[rom_addr:rom_addr + 4]
@@ -76,11 +77,14 @@ class Fet(NestedBuffer):
                 self.psptool.ph.print_warning(f"FET entry 0x{rom_addr:x} not found or invalid, skipping ...")
                 continue
             if dir_magic == b'2PSP' or dir_magic == b'2BHD':
-                combo_results = self._parse_combo_dir(rom_addr)
+                try:
+                    combo_results = self._parse_combo_dir(rom_addr)
+                except Exception as e:
+                    self.psptool.ph.print_warning(f"Skipping malformed combo directory at 0x{rom_addr:x}: {e!r}")
+                    continue
                 for result in combo_results:
                     combo_offset = result[0]
                     combo_zen_gen = result[1]
-                    dir_magic = self.rom[combo_offset:combo_offset + 4]
                     dirs = Directory.create_directories_if_not_exist(combo_offset, self, combo_zen_gen)
                     for dir_ in dirs:
                         if dir_ not in self.directories:
@@ -94,6 +98,8 @@ class Fet(NestedBuffer):
     def _parse_combo_dir(self, dir_addr):
         results = []
         no_of_entries = int.from_bytes(self.rom[dir_addr + 8: dir_addr + 0xc], 'little')
+        if no_of_entries > self._MAX_COMBO_ENTRIES:
+            raise ValueError(f'Combo directory has too many entries ({no_of_entries})')
         combo_dir = self.rom[dir_addr: dir_addr + 16 * (no_of_entries + 2)]
 
         # Combo dir entries seem to begin at offset 0x20, make sure we don't
@@ -105,13 +111,7 @@ class Fet(NestedBuffer):
             entry_addr = int.from_bytes(entry, 'little')
             if entry_addr in [0, 0xFFFFFFFF]:
                 continue
-            # if ROM is bigger than 16MB, we have to override the mask for
-            # physical address
-            rom_size = self.rom.addr_mask + 1
-            if entry_addr > 0xFF000000 and rom_size > 16 * 1024 * 1024:
-                entry_addr &= 0x00FFFFFF
-            else:
-                entry_addr &= self.rom.addr_mask
+            entry_addr = self.rom.address_to_offset(entry_addr)
 
             # entry_addr += self.blob_offset
             zen_generation_id = combo_dir[i*16+5:i*16+8]

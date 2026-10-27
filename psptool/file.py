@@ -44,14 +44,14 @@ class File(NestedBuffer):
             file = cls.from_entry(directory, directory.parent_buffer, entry, directory.rom, directory.psptool)
             if file is not None:
                 return file
-        elif entry.file_offset() in directory.psptool.files_by_offset:
-            existing_file = directory.psptool.files_by_offset[entry.file_offset()]
+        elif entry.file_offset() in directory.rom.files_by_offset:
+            existing_file = directory.rom.files_by_offset[entry.file_offset()]
             existing_file.references.append(directory)
             return existing_file
         else:
             file = cls.from_entry(directory, directory.parent_buffer, entry, directory.rom, directory.psptool)
             if file is not None:
-                directory.psptool.files_by_offset[entry.file_offset()] = file
+                directory.rom.files_by_offset[entry.file_offset()] = file
                 return file
         pass
 
@@ -248,15 +248,17 @@ class File(NestedBuffer):
 
     @classmethod
     def from_entry(cls, parent_directory, parent_buffer, entry, blob, psptool):
-        assert entry.file_offset() < len(parent_directory.rom), "File offset overflows ROM bounds!"
-        file_args = [parent_directory, parent_buffer, entry.file_offset(), entry, blob, psptool]
-
         from .pubkey_file import PubkeyFile
         from .key_store_file import KeyStoreFile
         from .header_file import HeaderFile
         from .microcode_file import MicrocodeFile
 
         try:
+            if entry.file_offset() >= len(parent_directory.rom):
+                parent_directory.rom.entry_overflows = True
+                raise File.ParseError("File offset overflows ROM bounds!")
+            file_args = [parent_directory, parent_buffer, entry.file_offset(), entry, blob, psptool]
+
             if entry.type in cls.PUBKEY_ENTRY_TYPES:
                 return PubkeyFile(*file_args)
             elif entry.type in File.KEY_STORE_TYPES:
@@ -267,8 +269,8 @@ class File(NestedBuffer):
                 return MicrocodeFile(*file_args)
             else:
                 return cls(*file_args)
-        except File.ParseError as e:
-            psptool.ph.print_warning(f"ParseError from {entry}: \n  {e}")
+        except Exception as e:
+            psptool.ph.print_warning(f"ParseError from {entry}: \n  {e!r}")
             return None
 
     def __init__(self, parent_directory, parent_buffer, offset, entry, blob, psptool):
@@ -301,7 +303,7 @@ class File(NestedBuffer):
                 raise File.ParseError(e)
         else:
             if self.compressed:
-                zlib_hdr = zlib_find_header(self.blob[offset:])
+                zlib_hdr = zlib_find_header(self.blob.get_bytes(offset, 0x500))
                 if zlib_hdr != -1:
                     zlib_size = int.from_bytes(
                         self.blob.get_bytes(offset + 0x14, 4),

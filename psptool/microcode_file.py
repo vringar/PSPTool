@@ -28,9 +28,10 @@ class MicrocodeFile(BiosFile):
         # Sometime microcode files can be wrapped in a PSP blob header
         try:
             self.header = HeaderFile(parent_directory, parent_buffer, offset, entry, blob, psptool)
-            self.body = self.header.get_decrypted_decompressed_body()
-            self.date = struct.unpack('<I', self.body[0:4])[0]
-            self.patch_level = struct.unpack('<I', self.body[4:8])[0]
+            # Only the first words are needed; don't retain a (possibly huge) decompressed body
+            prefix = self.header.get_decrypted_decompressed_prefix(8)
+            self.date = struct.unpack('<I', prefix[0:4])[0]
+            self.patch_level = struct.unpack('<I', prefix[4:8])[0]
         except File.ParseError as e:
             self.header = None
             self.date = struct.unpack('<I', self[0:4])[0]

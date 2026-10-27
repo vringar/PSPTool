@@ -13,7 +13,7 @@ fixtures_path = os.path.join(dirname, 'fixtures/test_files')
 VERIFIED_METHODS = {'signature', 'signature+sha256', 'signature+sha384', 'sha256', 'sha384', 'plain'}
 UNVERIFIED_METHODS = {'signature-failed', 'signature-unresolved', 'signature-error',
                       'signature-partial', 'sha256-failed', 'sha384-failed',
-                      'decompress-failed', 'unverifiable'}
+                      'decompress-failed', 'decode-error', 'unverifiable'}
 
 
 @unittest.skipUnless(os.path.isdir(fixtures_path), "firmware fixtures submodule not checked out")

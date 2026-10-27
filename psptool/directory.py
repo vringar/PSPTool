@@ -73,62 +73,61 @@ class Directory(NestedBuffer):
 
     @classmethod
     def create_directories_if_not_exist(cls, offset, fet, zen_generation=None) -> List['Directory']:
-        # Recursively return or create and return found directories
-
-        if offset in fet.psptool.directories_by_offset:
-            fet.psptool.directories_by_offset[offset].update_zen_generation(fet, zen_generation)
-            return [fet.psptool.directories_by_offset[offset]]
-        else:
-            # 1. Create the immediate directory in front of us
-            created_directories = []
+        # Return or create and return found directories, depth-first: each directory is followed by its secondary
+        # and then its tertiary directories. A worklist instead of recursion bounds the stack for long chains.
+        directories_by_offset = fet.rom.directories_by_offset
+        found_directories = []
+        todo = [(offset, zen_generation, False)]
+        while todo:
+            offset, zen_generation, is_tertiary_pointer = todo.pop()
+            if len(directories_by_offset) >= cls.MAX_DIRECTORIES_PER_ROM or fet.rom.entry_count >= cls.MAX_ENTRIES_PER_ROM:
+                fet.psptool.ph.print_warning("Too many directories or entries in ROM, ignoring the rest")
+                break
             try:
-                directory = cls.from_offset(fet, offset, zen_generation)
-                fet.psptool.directories_by_offset[offset] = directory
-                created_directories.append(directory)
-            except Directory.ParseError as e:
-                # Handle empty entries gracefully (like master branch)
-                if "Empty entry" in str(e):
-                    fet.psptool.ph.print_warning(f"Skipping empty directory entry at offset 0x{offset:x}")
-                    return []
-                # Some slot headers point at other data, such as an APCB
-                fet.psptool.ph.print_warning(f"Skipping non-directory at offset 0x{offset:x}")
-                return []
+                if is_tertiary_pointer:
+                    # Tertiary directories (double references introduced in Zen 4): resolve one more indirection
+                    directory_body = fet.rom.get_bytes(fet.rom.address_to_offset(offset), 32)
 
-            # 2. Recursively add secondary directories referenced by the just created directory, if applicable
-            for secondary_directory_offset in directory.secondary_directory_offsets:
-                secondary_directories = cls.create_directories_if_not_exist(secondary_directory_offset, fet, zen_generation)
-                created_directories += secondary_directories
+                    # Some ROMs point straight at the L2 directory instead of at a
+                    # header holding its offset, so there is nothing to resolve
+                    if directory_body[:4] not in cls.DIRECTORY_MAGICS + BiosDirectory.DIRECTORY_MAGICS:
+                        offset = int.from_bytes(directory_body[16:20], 'little')
+                        zen_generation_id = directory_body[21:24]
+                        zen_generation = cls.get_possible_zen_generation(zen_generation_id)
+                        if zen_generation == 'unknown':
+                            fet.psptool.ph.print_warning(f"Unknown {zen_generation_id=}")
 
-            # 3. Recursively add tertiary directories (double references introduced in Zen 4), if applicable
-            for tertiary_directory_offset in directory.tertiary_directory_offsets:
-                directory_body = fet.rom.get_bytes(tertiary_directory_offset, 32)
+                        zen_generation_id = hex(int.from_bytes(directory_body[20:24], 'little'))
+                        zen_generation += f' (PSP ID {zen_generation_id})'
 
-                # Some ROMs point straight at the L2 directory instead of at a
-                # header holding its offset, so there is nothing to resolve
-                if directory_body[:4] in cls.DIRECTORY_MAGICS + BiosDirectory.DIRECTORY_MAGICS:
-                    created_directories += cls.create_directories_if_not_exist(
-                        tertiary_directory_offset, fet, zen_generation)
+                # Resolve to a ROM offset first so aliased addresses share one dedup key
+                offset = fet.rom.address_to_offset(offset)
+                if offset in directories_by_offset:
+                    directories_by_offset[offset].update_zen_generation(fet, zen_generation)
+                    found_directories.append(directories_by_offset[offset])
                     continue
 
-                actual_tertiary_offset = int.from_bytes(directory_body[16:20], 'little')
-                zen_generation_id = directory_body[21:24]
-                tertiary_zen_generation = cls.get_possible_zen_generation(zen_generation_id)
-                if tertiary_zen_generation == 'unknown':
-                    fet.psptool.ph.print_warning(f"Unknown {zen_generation_id=}")
+                directory = cls.from_offset(fet, offset, zen_generation)
+            except Directory.ParseError as e:
+                # from_offset already warned about the unknown magic
+                if "Empty entry" in str(e):
+                    fet.psptool.ph.print_warning(f"Skipping empty directory entry at offset 0x{offset:x}")
+                continue
+            except Exception as e:
+                fet.psptool.ph.print_warning(f"Skipping malformed directory at offset 0x{offset:x}: {e!r}")
+                continue
 
-                zen_generation_id = hex(int.from_bytes(directory_body[20:24], 'little'))
-                tertiary_zen_generation += f' (PSP ID {zen_generation_id})'
+            directories_by_offset[offset] = directory
+            fet.rom.entry_count += len(directory.entries)
+            found_directories.append(directory)
+            todo += reversed([(o, zen_generation, False) for o in directory.secondary_directory_offsets] +
+                             [(o, zen_generation, True) for o in directory.tertiary_directory_offsets])
 
-                # Resolve one more indirection
-                tertiary_directories = cls.create_directories_if_not_exist(
-                    actual_tertiary_offset, fet, tertiary_zen_generation)
-                created_directories += tertiary_directories
-
-            return created_directories
+        return found_directories
 
     @classmethod
     def from_offset(cls, fet, rom_offset, zen_generation=None):
-        rom_offset &= fet.rom.addr_mask
+        rom_offset = fet.rom.address_to_offset(rom_offset)
         magic = fet.rom.get_bytes(rom_offset, 4)
 
         if magic == b'\xff\xff\xff\xff' or magic == b'\x00\x00\x00\x00':
@@ -147,7 +146,7 @@ class Directory(NestedBuffer):
         self.rom = parent_rom
         self.buffer_offset = offset
         self.psptool = psptool
-        self.zen_generation = zen_generation
+        self.zen_generations = [] if zen_generation is None else [zen_generation]
         self.bios_directory_type = BiosDirectory
 
         # a directory must parse itself before it knows its size and can initialize its buffer
@@ -254,16 +253,26 @@ class Directory(NestedBuffer):
     def update_zen_generation(self, fet, zen_generation):
         if zen_generation is None:
             return
-        # A directory first reached without a generation takes the new one
-        if self.zen_generation is None:
-            self.zen_generation = zen_generation
-        elif zen_generation not in self.zen_generation:
-            self.zen_generation += '\n' + zen_generation
-        else:
-            return
-        for offset in self.secondary_directory_offsets:
-            dir = fet.psptool.directories_by_offset[offset]
-            dir.update_zen_generation(fet, zen_generation)
+        todo = [self]
+        while todo:
+            directory = todo.pop()
+            if directory is None or zen_generation in directory.zen_generations:
+                continue
+            directory.zen_generations.append(zen_generation)
+            todo += [fet.rom.directories_by_offset.get(offset) for offset in directory.secondary_directory_offsets]
+
+    # Per-ROM budgets against crafted images with aliased or overlapping directories
+    MAX_DIRECTORIES_PER_ROM = 4096
+
+    MAX_ENTRIES_PER_ROM = 1 << 16
+
+    @property
+    def zen_generation(self):
+        return '\n'.join(self.zen_generations) if self.zen_generations else None
+
+    @zen_generation.setter
+    def zen_generation(self, value):
+        self.zen_generations = [] if value is None else [value]
 
 
 class BiosDirectory(Directory):

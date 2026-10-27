@@ -20,8 +20,10 @@ from binascii import hexlify
 from hashlib import md5, sha256, sha384
 from enum import Enum
 
+import zlib
+
 from . import errors
-from .utils import NestedBuffer, zlib_decompress, decrypt, shannon
+from .utils import NestedBuffer, zlib_decompress, zlib_find_header, decrypt, shannon
 from .file import File
 
 class SignatureType(Enum):
@@ -47,7 +49,7 @@ class SignatureType(Enum):
         for st in cls:
             if st.type == type:
                 return st
-        return File.ParseError(f"Unknown signature type 0x{type:x}")
+        raise File.ParseError(f"Unknown signature type 0x{type:x}")
 
 class Signature(NestedBuffer):
     def __init__(self, file: 'HeaderFile', type: SignatureType):
@@ -63,9 +65,15 @@ class HeaderFile(File):
 
     HEADER_LEN = 0x100
 
+    def _check_parent_bounds(self):
+        if self.buffer_offset + self.buffer_size > self.parent_buffer.buffer_size:
+            raise File.ParseError(f'File size 0x{self.buffer_size:x} at offset 0x{self.buffer_offset:x} overflows '
+                                  f'its parent buffer')
+
     def _parse(self):
         if self.buffer_size < 0x100:  # give those with a entry size of 0 (!?) a chance to get their header parsed
             self.buffer_size = 0x100
+            self._check_parent_bounds()
         self.header = NestedBuffer(self, HeaderFile.HEADER_LEN)
 
         # Will be set by the CertificateTree created after the blob
@@ -113,12 +121,12 @@ class HeaderFile(File):
             self.rom_size = self.buffer_size
         elif self.rom_size > self.buffer_size:
             self.buffer_size = self.rom_size
+            self._check_parent_bounds()
 
         # self.iv = hexlify(self.header[0x20:0x30])
         # self.wrapped_key = hexlify(self.header[0x80:0x90])
 
         # TODO: Take care of headers with only 0xfff...
-        # TODO if zlib_size == 0 try size_signed
 
         self.signature = Signature(self, SignatureType.from_header(signed, signature_type))
 
@@ -137,6 +145,8 @@ class HeaderFile(File):
         assert 0 < self.rom_size <= self.buffer_size
         self.buffer_size = self.rom_size
         self.body = NestedBuffer(self, len(self) - len(self.header) - self.signature.len, len(self.header))
+        if self.encrypted and len(self.body) % 16:
+            raise File.ParseError(f'Encrypted body size 0x{len(self.body):x} is not a multiple of the AES block size')
         self.is_legacy = False
 
     def get_checksummed_bytes(self):
@@ -209,24 +219,45 @@ class HeaderFile(File):
             forms.append(('stored', stored[:len(self.header) + self.size_signed]))
         return forms
 
-    def _decrypted_decompressed_body(self, print_warning=True) -> tuple:
+    def _decrypted_decompressed_body(self, print_warning=True, max_size=None) -> tuple:
         """Returns (body, decompress_ok). When the entry is flagged compressed but
         its declared zlib stream fails to decompress, the still-compressed (but
         decrypted) bytes are returned and decompress_ok is False, so callers can
-        tell a genuine plaintext body from a silently-failed decode."""
+        tell a genuine plaintext body from a silently-failed decode. A zlib_size
+        of 0 (Zen 1 era images) leaves the stream length unrecorded; the stream
+        then runs to its end marker within the body. max_size caps the decompressed size
+        (default: the size of the whole blob)."""
         output = self.get_decrypted_body()
 
         if self.compressed:
             try:
-                return zlib_decompress(output[:self.zlib_size]), True
+                stream = output[:self.zlib_size] if self.zlib_size else output
+                if self.zlib_size > len(output) or zlib_find_header(stream) == -1:
+                    raise ValueError('No zlib stream within the body')
+                # A decompressed entry larger than its whole ROM is a zlib bomb, not firmware
+                return zlib_decompress(stream, len(self.blob) if max_size is None else max_size), True
             except Exception:
                 if print_warning:
                     self.psptool.ph.print_warning(f"ZLIB decompression failed on file {self.get_readable_type()}")
                 return output, False
         return output, True
 
-    def get_decrypted_decompressed_body(self) -> bytes:
-        return self._decrypted_decompressed_body()[0]
+    def get_decrypted_decompressed_body(self, max_size=None) -> bytes:
+        return self._decrypted_decompressed_body(max_size=max_size)[0]
+
+    def get_decrypted_decompressed_prefix(self, size) -> bytes:
+        """The first `size` bytes of the decoded body, without materializing the rest of a compressed body."""
+        output = self.get_decrypted_body()
+        if self.compressed:
+            try:
+                stream = output[:self.zlib_size] if self.zlib_size else output
+                start = zlib_find_header(stream)
+                if self.zlib_size > len(output) or start == -1:
+                    raise ValueError('No zlib stream within the body')
+                return stream[:start] + zlib.decompressobj().decompress(stream[start:], size)
+            except Exception:
+                pass
+        return output[:size]
 
     def decode_verification(self, print_warning=False) -> tuple:
         """Returns (verified, basis) in a single pass - use this when you want
@@ -237,7 +268,12 @@ class HeaderFile(File):
 
     def _verify_decode(self, print_warning=False) -> tuple:
         """Returns (verified, basis). See decode_verified()."""
-        body, decompress_ok = self._decrypted_decompressed_body(print_warning=print_warning)
+        try:
+            body, decompress_ok = self._decrypted_decompressed_body(print_warning=print_warning)
+        except Exception:
+            if print_warning:
+                self.psptool.ph.print_warning(f"Decoding failed on file {self.get_readable_type()}")
+            return False, 'decode-error'
         if not decompress_ok:
             return False, 'decompress-failed'
         if self.signed_entity is not None:
@@ -265,7 +301,7 @@ class HeaderFile(File):
             # If the signature covers the zlib stream, the decompressed body is a
             # deterministic function of the signed bytes.
             stored = self.signed_entity.verified_form == 'stored'
-            signed_extent = self.zlib_size if stored else len(body)
+            signed_extent = (self.zlib_size or len(self.body)) if stored else len(body)
             if self.size_signed >= signed_extent:
                 return True, 'signature'
             if self.has_sha256_checksum and self.verify_sha256(print_warning=print_warning):
@@ -297,15 +333,20 @@ class HeaderFile(File):
         standalone stored checksum, or an untransformed and unsigned body), and
         False when it cannot be confirmed - a wrong or unknown IKEK, a failed
         decompression, an unresolved certifying key, a signature that covers only
-        part of the body, or tampering."""
+        part of the body, or tampering.
+
+        A 'signature' basis means the image is self-consistent: the signature
+        checks out against a key found in this same image, matched by its 16-byte
+        key ID. It is not authenticated against an AMD root of trust, so a key
+        added to a tampered image can vouch for that image's own bodies."""
         return self._verify_decode(print_warning=print_warning)[0]
 
     def decode_verification_method(self) -> str:
         """The basis for decode_verified(): one of 'signature', 'signature+sha256',
         'signature+sha384', 'sha256', 'sha384' or 'plain' when verified;
         'signature-failed', 'signature-unresolved', 'signature-error',
-        'signature-partial', 'sha256-failed', 'sha384-failed', 'decompress-failed'
-        or 'unverifiable' when not."""
+        'signature-partial', 'sha256-failed', 'sha384-failed', 'decompress-failed',
+        'decode-error' or 'unverifiable' when not."""
         return self._verify_decode()[1]
 
     def plaintext_identity_ok(self) -> bool:
