@@ -79,7 +79,7 @@ class HeaderFile(File):
         # Will be set by the CertificateTree created after the blob
         self.signed_entity = None
 
-        # Will be set by blob._find_inline_pubkeys
+        # Will be set by blob.find_inline_pubkey_entries
         self.inline_keys = set()
 
         # todo: use NestedBuffers instead of saving by value

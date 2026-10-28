@@ -157,18 +157,22 @@ class Blob(NestedBuffer):
             fet_offset = m.start() + 4
             yield fet_offset
 
-    def _find_inline_pubkeys(self, fp):
-
-        """ Try to find a pubkey in any of the found files.
-        The pubkey is identified by its fingerprint. If found, the pubkey is
-        added to the list of pubkeys of the blob """
+    def find_inline_pubkey_entries(self, ids):
+        """ Try to find pubkeys in any of the found files.
+        A pubkey is identified by its fingerprint, one of ids. Every file is
+        scanned once for all ids. If found, the pubkey is added to the list
+        of pubkeys of the blob """
         found_pubkeys = []
+        if not ids:
+            return found_pubkeys
+        # Lookahead keeps matches of different ids from hiding each other
+        pattern = re.compile(b'(?=(' + b'|'.join(re.escape(binascii.a2b_hex(fp)) for fp in ids) + b'))')
 
         for file in self.unique_files():
             if type(file) == PubkeyFile:
                 continue  # Pubkeys don't have inline keys but will only produce false positives
             data = file.get_bytes()
-            for index in re.finditer(re.escape(binascii.a2b_hex(fp)), data):
+            for index in pattern.finditer(data):
                 try:
                     # Offsets are relative to the file the match was found in
                     start_offset = index.start() - 4
@@ -202,12 +206,6 @@ class Blob(NestedBuffer):
                     self.psptool.ph.print_warning(f"_find_pubkey: File parse error in {file} at 0x{index.start():x}: {e!r}")
 
         return found_pubkeys
-
-    def find_inline_pubkey_entries(self, ids):
-        found_pkes = []
-        for key_id in ids:
-            found_pkes += self._find_inline_pubkeys(key_id)
-        return found_pkes
 
     def get_files_by_type(self, type_) -> List[File]:
         all_files = self.unique_files()
